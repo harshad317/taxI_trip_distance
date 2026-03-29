@@ -64,11 +64,11 @@ MODEL_CONFIG = ExperimentConfig(
     iterations=2500,
     learning_rate=0.03,
     depth=8,
-    l2_leaf_reg=5.0,
+    l2_leaf_reg=10.0,
     min_data_in_leaf=10,
     random_strength=1.0,
     subsample=0.85,
-    bootstrap_type="Bernoulli",
+    bootstrap_type='Bernoulli',
     bagging_temperature=1.0,
     early_stopping_rounds=200,
 )
