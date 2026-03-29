@@ -1,0 +1,14 @@
+[project]
+name = "taxi-trip-distance-autoresearch"
+version = "0.1.0"
+description = "Autonomous experimentation loop for taxi trip distance prediction"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "catboost>=1.2.8",
+    "lightgbm>=4.6.0",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.7.2",
+    "xgboost>=3.0.5",
+]
