@@ -74,7 +74,7 @@ MODEL_CONFIG = ExperimentConfig(
     bootstrap_type='Bernoulli',
     bagging_temperature=1.0,
     early_stopping_rounds=200,
-    ensemble_seeds=(42, 43, 44, 45),
+    ensemble_seeds=(42, 43, 44, 45, 49),
 )
 FEATURE_CONFIG = FeatureConfig(
     keep_raw_datetime_strings=True,
