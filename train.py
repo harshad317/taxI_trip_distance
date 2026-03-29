@@ -62,7 +62,7 @@ class FeatureConfig:
 # AUTOTUNE_CONFIG_START
 MODEL_CONFIG = ExperimentConfig(
     iterations=2500,
-    learning_rate=0.03,
+    learning_rate=0.021,
     depth=7,
     l2_leaf_reg=12.5,
     min_data_in_leaf=30,
