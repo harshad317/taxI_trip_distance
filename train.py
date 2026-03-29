@@ -31,6 +31,8 @@ except ImportError as exc:  # pragma: no cover
 TARGET_COLUMN = "trip_distance_miles"
 VALIDATION_FRACTION = 0.20
 RANDOM_STATE = 42
+PREDICTIONS_DIRNAME = "Predictions"
+PREDICTIONS_FILENAME = "prediction_taxi.csv"
 
 
 @dataclass
@@ -45,6 +47,7 @@ class ExperimentConfig:
     bootstrap_type: str = "Bernoulli"
     bagging_temperature: float = 1.0
     early_stopping_rounds: int = 200
+    ensemble_seeds: tuple[int, ...] = (42,)
 
 
 @dataclass
@@ -71,6 +74,7 @@ MODEL_CONFIG = ExperimentConfig(
     bootstrap_type='Bernoulli',
     bagging_temperature=1.0,
     early_stopping_rounds=200,
+    ensemble_seeds=(42, 43, 44, 45),
 )
 FEATURE_CONFIG = FeatureConfig(
     keep_raw_datetime_strings=True,
@@ -377,6 +381,34 @@ def fit_model(
     return model
 
 
+def fit_ensemble(
+    x_train: pd.DataFrame,
+    y_train: pd.Series,
+    x_valid: pd.DataFrame,
+    y_valid: pd.Series,
+    model_config: ExperimentConfig,
+) -> list[CatBoostRegressor]:
+    return [
+        fit_model(
+            x_train=x_train,
+            y_train=y_train,
+            x_valid=x_valid,
+            y_valid=y_valid,
+            model_config=model_config,
+            random_state=seed,
+        )
+        for seed in model_config.ensemble_seeds
+    ]
+
+
+def predict_ensemble(
+    models: list[CatBoostRegressor],
+    features: pd.DataFrame,
+) -> np.ndarray:
+    predictions = [model.predict(features) for model in models]
+    return np.mean(predictions, axis=0)
+
+
 def fit_final_model(
     x_full: pd.DataFrame,
     y_full: pd.Series,
@@ -389,6 +421,24 @@ def fit_final_model(
     model = build_model(model_config=model_config, random_state=random_state, iterations=iterations)
     model.fit(x_full, y_full, cat_features=categorical_indices)
     return model
+
+
+def fit_final_ensemble(
+    x_full: pd.DataFrame,
+    y_full: pd.Series,
+    model_config: ExperimentConfig,
+    iterations_by_seed: list[int],
+) -> list[CatBoostRegressor]:
+    return [
+        fit_final_model(
+            x_full=x_full,
+            y_full=y_full,
+            model_config=model_config,
+            random_state=seed,
+            iterations=iterations,
+        )
+        for seed, iterations in zip(model_config.ensemble_seeds, iterations_by_seed, strict=True)
+    ]
 
 
 def save_submission(
@@ -415,6 +465,18 @@ def save_submission(
     submission.to_csv(output_path, index=False)
 
 
+def save_latest_prediction_copy(
+    repo_root: Path,
+    submission_template_path: Path | None,
+    predictions: np.ndarray,
+) -> Path:
+    predictions_dir = repo_root / PREDICTIONS_DIRNAME
+    predictions_dir.mkdir(parents=True, exist_ok=True)
+    latest_prediction_path = predictions_dir / PREDICTIONS_FILENAME
+    save_submission(submission_template_path, predictions, latest_prediction_path)
+    return latest_prediction_path
+
+
 def print_summary(metrics: dict[str, str | float | int]) -> None:
     print("---")
     for key, value in metrics.items():
@@ -432,6 +494,7 @@ def run_experiment(
     print_metrics: bool,
 ) -> dict[str, str | float | int | dict[str, float | int | bool | str]]:
     total_start = time.time()
+    repo_root = Path(__file__).resolve().parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     train_df = pd.read_csv(train_path)
@@ -459,17 +522,16 @@ def run_experiment(
     y_valid = valid_split_df[TARGET_COLUMN]
 
     train_start = time.time()
-    model = fit_model(
+    models = fit_ensemble(
         x_train=x_train,
         y_train=y_train,
         x_valid=x_valid,
         y_valid=y_valid,
         model_config=model_config,
-        random_state=RANDOM_STATE,
     )
     training_seconds = time.time() - train_start
 
-    validation_predictions = np.clip(model.predict(x_valid), a_min=0.0, a_max=None)
+    validation_predictions = np.clip(predict_ensemble(models, x_valid), a_min=0.0, a_max=None)
     val_rmse = math.sqrt(mean_squared_error(y_valid, validation_predictions))
 
     validation_output = valid_split_df.copy()
@@ -481,7 +543,8 @@ def run_experiment(
     validation_output.to_csv(validation_predictions_path, index=False)
 
     submission_file = "not_generated"
-    final_iterations = max(200, int(model.tree_count_))
+    final_iterations = [max(200, int(model.tree_count_)) for model in models]
+    average_best_iteration = int(round(np.mean([model.get_best_iteration() for model in models])))
 
     if generate_submission:
         test_df = pd.read_csv(test_path)
@@ -490,24 +553,29 @@ def run_experiment(
 
         full_train_features = engineer_features(train_df.drop(columns=[TARGET_COLUMN]), feature_config)
         full_train_target = train_df[TARGET_COLUMN]
-        final_model = fit_final_model(
+        final_models = fit_final_ensemble(
             x_full=full_train_features,
             y_full=full_train_target,
             model_config=model_config,
-            random_state=RANDOM_STATE,
-            iterations=final_iterations,
+            iterations_by_seed=final_iterations,
         )
 
-        test_predictions = np.clip(final_model.predict(x_test), a_min=0.0, a_max=None)
+        test_predictions = np.clip(predict_ensemble(final_models, x_test), a_min=0.0, a_max=None)
         submission_output_path = output_dir / "submission_predictions.csv"
         save_submission(submission_path, test_predictions, submission_output_path)
-        submission_file = str(submission_output_path.relative_to(Path(__file__).resolve().parent))
+        latest_prediction_path = save_latest_prediction_copy(
+            repo_root=repo_root,
+            submission_template_path=submission_path,
+            predictions=test_predictions,
+        )
+        submission_file = str(latest_prediction_path.relative_to(repo_root))
 
     metrics = {
         "val_rmse": f"{val_rmse:.6f}",
         "training_seconds": f"{training_seconds:.1f}",
         "total_seconds": f"{time.time() - total_start:.1f}",
-        "best_iteration": int(model.get_best_iteration()),
+        "best_iteration": average_best_iteration,
+        "ensemble_size": len(models),
         "train_rows": len(train_split_df),
         "validation_rows": len(valid_split_df),
         "num_features": x_train.shape[1],
@@ -927,6 +995,7 @@ def run_autoloop(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    repo_root = Path(__file__).resolve().parent
     if args.autoloop:
         try:
             run_autoloop(args)
@@ -937,7 +1006,8 @@ def main() -> None:
     train_path = resolve_input_path(args.train_path, "Train.csv")
     test_path = resolve_input_path(args.test_path, "Test.csv")
     submission_path = resolve_optional_submission_path(args.submission_path)
-    output_dir = (Path(__file__).resolve().parent / args.output_dir).resolve()
+    output_dir = (repo_root / args.output_dir).resolve()
+    init_results_file((repo_root / args.results_path).resolve())
 
     run_experiment(
         train_path=train_path,
