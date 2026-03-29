@@ -63,10 +63,10 @@ class FeatureConfig:
 MODEL_CONFIG = ExperimentConfig(
     iterations=2500,
     learning_rate=0.03,
-    depth=8,
+    depth=7,
     l2_leaf_reg=10.0,
     min_data_in_leaf=22,
-    random_strength=1.0,
+    random_strength=2.0,
     subsample=0.85,
     bootstrap_type='Bernoulli',
     bagging_temperature=1.0,
@@ -78,7 +78,7 @@ FEATURE_CONFIG = FeatureConfig(
     add_same_borough_flag=True,
     add_peak_period_features=False,
     add_cyclical_time_features=False,
-    add_coordinate_center_features=False,
+    add_coordinate_center_features=True,
     add_manhattan_distance_feature=False,
     add_coordinate_bins=False,
 )
