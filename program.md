@@ -1,14 +1,11 @@
 # taxi autoresearch
 
-This repo should be operated in the same spirit as `karpathy/autoresearch`, but for the Taxi Trip Distance challenge.
-
 ## Model roles
 
 Use these roles consistently:
 
-- lead agent and research director: `gpt-5.2`
-- coding worker: `gpt-5.3-codex`
-- coding worker reasoning effort: `high`
+- lead agent and research director
+- coding worker:
 
 The lead agent owns research direction, experiment selection, result triage, and loop control.
 The coding worker owns implementation, running commands, collecting metrics, committing, and pushing improvements.
@@ -64,12 +61,12 @@ grep "^val_rmse:\|^best_iteration:" run.log
 
 ## Lead agent workflow
 
-The lead agent is `gpt-5.2`. It should:
+The lead agent should:
 
 1. Study the current baseline, results, and recent failures.
 2. Research the next promising idea.
 3. Form exactly one bounded experiment hypothesis at a time.
-4. Spawn a coding worker using `gpt-5.3-codex` with `high` reasoning.
+4. Spawn a coding worker.
 5. Give that worker clear ownership of:
    - `train.py`
    - optionally `README.md` or `program.md` if documentation needs to be updated
@@ -79,7 +76,7 @@ The lead agent is `gpt-5.2`. It should:
 
 ## Coding worker workflow
 
-The coding worker is `gpt-5.3-codex` with `high` reasoning. It should:
+The coding worker should:
 
 1. Implement only the assigned experiment.
 2. Run the experiment and collect:
@@ -89,6 +86,7 @@ The coding worker is `gpt-5.3-codex` with `high` reasoning. It should:
 3. If the run improves the best known `val_rmse`:
    - keep the code changes
    - update `results.tsv`
+   - Run the model on `Test.csv` and save the output as shown in `Submission.csv` file in `Predictions` folder.
    - commit the improvement
    - push to the current branch
 4. If the run does not improve:
@@ -105,6 +103,7 @@ timestamp	run	status	val_rmse	best_iteration	commit	branch	description	model_con
 ```
 
 `results.tsv` must not be committed.
+Always keep the predictions from the model in a saperate folder called: `Predictions`. Keep the file updting with best results. Make sure the file is named as `prediction_taxi.csv` and is always updated with latest results.
 
 ## What can change
 
