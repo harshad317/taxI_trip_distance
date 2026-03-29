@@ -110,19 +110,34 @@ c3d4e5f	0.744100	1400	discard	switch to weaker regularization
 d4e5f6g	0.000000	0	crash	invalid feature transform
 ```
 
-## Experiment loop
+## Built-in experiment loop
 
-LOOP FOREVER:
+The endless loop is implemented directly inside `train.py`.
 
-1. Check the current git state.
-2. Change only `train.py` with one clear experiment.
-3. Commit the change.
-4. Run `uv run train.py > run.log 2>&1`.
-5. Read the result with `grep "^val_rmse:\|^best_iteration:" run.log`.
-6. If the grep output is empty, inspect `tail -n 50 run.log`, fix obvious issues, and retry. If the idea is fundamentally broken, log a crash and move on.
-7. Record the run in `results.tsv`.
-8. If `val_rmse` improved, keep the commit and continue from there.
-9. If `val_rmse` is equal or worse, revert to the previous best commit and continue.
+Launch it with:
+
+```bash
+uv run train.py --autoloop > run.log 2>&1
+```
+
+Its behavior is:
+
+1. Run the current baseline configuration once.
+2. Generate a mutated candidate configuration.
+3. Evaluate the candidate on the fixed validation split.
+4. Log the result to `results.tsv`.
+5. If the candidate improves `val_rmse`, persist it into `train.py`.
+6. Commit the improved `train.py`.
+7. Push the improved commit to the current branch, unless `--no-push` is used.
+8. If the candidate does not improve, discard it and try another mutation.
+9. Repeat forever until interrupted.
+
+Useful flags:
+
+- `--max-runs N` for a bounded test run
+- `--no-commit` to test the loop without changing git history
+- `--no-push` to keep improvements local
+- `--allow-dirty` to bypass the clean-tree check
 
 ## Operating principles
 

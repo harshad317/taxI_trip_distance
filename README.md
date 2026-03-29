@@ -50,4 +50,32 @@ Or with explicit dataset paths:
 uv run train.py --train-path ../Train.csv --test-path ../Test.csv --submission-path ../Submission.csv
 ```
 
-The script writes all generated artifacts into `outputs/` and prints a stable summary block including `val_rmse`, which is the number the autonomous loop should optimize.
+`uv run train.py` is a single evaluation run. It writes generated artifacts into `outputs/` and prints a stable summary block including `val_rmse`.
+
+## Endless search
+
+To keep searching until you manually stop it:
+
+```bash
+uv run train.py --autoloop > run.log 2>&1
+```
+
+What `--autoloop` does:
+
+- runs the current baseline once
+- proposes new hyperparameter and feature mutations
+- evaluates each candidate on the same fixed 80/20 split
+- discards non-improving candidates automatically
+- persists improved configurations back into `train.py`
+- commits improved configurations
+- pushes improved commits to the current git branch unless you pass `--no-push`
+
+Useful variants:
+
+```bash
+# run forever in the foreground and watch logs
+uv run train.py --autoloop | tee run.log
+
+# test the loop without committing or pushing
+uv run train.py --autoloop --max-runs 3 --no-commit --no-push
+```
