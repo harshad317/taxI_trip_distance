@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 
 try:
     from catboost import CatBoostRegressor
@@ -33,6 +33,14 @@ VALIDATION_FRACTION = 0.20
 RANDOM_STATE = 42
 PREDICTIONS_DIRNAME = "Predictions"
 PREDICTIONS_FILENAME = "prediction_taxi.csv"
+TARGET_ENCODING_GROUPS = (
+    ("pickup_borough",),
+    ("dropoff_borough",),
+    ("pickup_borough", "dropoff_borough"),
+    ("traffic_congestion_level",),
+    ("traffic_congestion_level", "pickup_borough", "dropoff_borough"),
+    ("passenger_count",),
+)
 
 
 @dataclass
@@ -48,6 +56,7 @@ class ExperimentConfig:
     bagging_temperature: float = 1.0
     early_stopping_rounds: int = 200
     ensemble_seeds: tuple[int, ...] = (42,)
+    target_encoding_blend_weight: float = 0.0
 
 
 @dataclass
@@ -75,6 +84,7 @@ MODEL_CONFIG = ExperimentConfig(
     bagging_temperature=1.0,
     early_stopping_rounds=200,
     ensemble_seeds=(42, 43, 44, 45, 49),
+    target_encoding_blend_weight=0.2,
 )
 FEATURE_CONFIG = FeatureConfig(
     keep_raw_datetime_strings=True,
@@ -335,6 +345,88 @@ def engineer_features(frame: pd.DataFrame, feature_config: FeatureConfig) -> pd.
     return features
 
 
+def lookup_target_encoding(
+    features: pd.DataFrame,
+    group_columns: tuple[str, ...],
+    mapping: pd.Series,
+    feature_name: str,
+    fill_value: float,
+) -> np.ndarray:
+    merged = features[list(group_columns)].merge(
+        mapping.rename(feature_name),
+        left_on=list(group_columns),
+        right_index=True,
+        how="left",
+    )
+    return merged[feature_name].fillna(fill_value).to_numpy()
+
+
+def add_target_encoding_features_for_validation(
+    train_features: pd.DataFrame,
+    train_target: pd.Series,
+    valid_features: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    encoded_train = train_features.copy()
+    encoded_valid = valid_features.copy()
+    global_mean = float(train_target.mean())
+    splitter = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+    for group_columns in TARGET_ENCODING_GROUPS:
+        feature_name = "te_" + "_".join(group_columns)
+        oof_values = pd.Series(index=encoded_train.index, dtype=float)
+
+        for fit_indices, hold_indices in splitter.split(encoded_train):
+            fit_frame = encoded_train.iloc[fit_indices][list(group_columns)].copy()
+            fit_frame[TARGET_COLUMN] = train_target.iloc[fit_indices].to_numpy()
+            mapping = fit_frame.groupby(list(group_columns), dropna=False)[TARGET_COLUMN].mean()
+            oof_values.iloc[hold_indices] = lookup_target_encoding(
+                features=encoded_train.iloc[hold_indices],
+                group_columns=group_columns,
+                mapping=mapping,
+                feature_name=feature_name,
+                fill_value=global_mean,
+            )
+
+        full_frame = encoded_train[list(group_columns)].copy()
+        full_frame[TARGET_COLUMN] = train_target.to_numpy()
+        full_mapping = full_frame.groupby(list(group_columns), dropna=False)[TARGET_COLUMN].mean()
+
+        encoded_train[feature_name] = oof_values.fillna(global_mean).to_numpy()
+        encoded_valid[feature_name] = lookup_target_encoding(
+            features=encoded_valid,
+            group_columns=group_columns,
+            mapping=full_mapping,
+            feature_name=feature_name,
+            fill_value=global_mean,
+        )
+
+    return encoded_train, encoded_valid
+
+
+def add_target_encoding_features_from_reference(
+    reference_features: pd.DataFrame,
+    reference_target: pd.Series,
+    features_to_encode: pd.DataFrame,
+) -> pd.DataFrame:
+    encoded_features = features_to_encode.copy()
+    global_mean = float(reference_target.mean())
+
+    for group_columns in TARGET_ENCODING_GROUPS:
+        feature_name = "te_" + "_".join(group_columns)
+        reference_frame = reference_features[list(group_columns)].copy()
+        reference_frame[TARGET_COLUMN] = reference_target.to_numpy()
+        mapping = reference_frame.groupby(list(group_columns), dropna=False)[TARGET_COLUMN].mean()
+        encoded_features[feature_name] = lookup_target_encoding(
+            features=encoded_features,
+            group_columns=group_columns,
+            mapping=mapping,
+            feature_name=feature_name,
+            fill_value=global_mean,
+        )
+
+    return encoded_features
+
+
 def build_model(model_config: ExperimentConfig, random_state: int, iterations: int | None = None) -> CatBoostRegressor:
     effective_iterations = model_config.iterations if iterations is None else iterations
     params: dict[str, float | int | str | bool] = {
@@ -522,16 +614,48 @@ def run_experiment(
     y_valid = valid_split_df[TARGET_COLUMN]
 
     train_start = time.time()
-    models = fit_ensemble(
+    base_models = fit_ensemble(
         x_train=x_train,
         y_train=y_train,
         x_valid=x_valid,
         y_valid=y_valid,
         model_config=model_config,
     )
+    model_iteration_counts = [max(200, int(model.tree_count_)) for model in base_models]
+    best_iteration_values = [int(model.get_best_iteration()) for model in base_models]
+    validation_predictions = predict_ensemble(base_models, x_valid)
+
+    target_encoding_models: list[CatBoostRegressor] = []
+    target_encoding_iteration_counts: list[int] = []
+    target_encoding_weight = model_config.target_encoding_blend_weight
+
+    if target_encoding_weight > 0.0:
+        encoded_train, encoded_valid = add_target_encoding_features_for_validation(
+            train_features=x_train,
+            train_target=y_train,
+            valid_features=x_valid,
+        )
+        target_encoding_models = fit_ensemble(
+            x_train=encoded_train,
+            y_train=y_train,
+            x_valid=encoded_valid,
+            y_valid=y_valid,
+            model_config=model_config,
+        )
+        target_encoding_iteration_counts = [
+            max(200, int(model.tree_count_)) for model in target_encoding_models
+        ]
+        best_iteration_values.extend(
+            int(model.get_best_iteration()) for model in target_encoding_models
+        )
+        encoded_validation_predictions = predict_ensemble(target_encoding_models, encoded_valid)
+        validation_predictions = (
+            (1.0 - target_encoding_weight) * validation_predictions
+            + target_encoding_weight * encoded_validation_predictions
+        )
     training_seconds = time.time() - train_start
 
-    validation_predictions = np.clip(predict_ensemble(models, x_valid), a_min=0.0, a_max=None)
+    validation_predictions = np.clip(validation_predictions, a_min=0.0, a_max=None)
     val_rmse = math.sqrt(mean_squared_error(y_valid, validation_predictions))
 
     validation_output = valid_split_df.copy()
@@ -543,8 +667,7 @@ def run_experiment(
     validation_output.to_csv(validation_predictions_path, index=False)
 
     submission_file = "not_generated"
-    final_iterations = [max(200, int(model.tree_count_)) for model in models]
-    average_best_iteration = int(round(np.mean([model.get_best_iteration() for model in models])))
+    average_best_iteration = int(round(np.mean(best_iteration_values)))
 
     if generate_submission:
         test_df = pd.read_csv(test_path)
@@ -553,14 +676,38 @@ def run_experiment(
 
         full_train_features = engineer_features(train_df.drop(columns=[TARGET_COLUMN]), feature_config)
         full_train_target = train_df[TARGET_COLUMN]
-        final_models = fit_final_ensemble(
+        base_final_models = fit_final_ensemble(
             x_full=full_train_features,
             y_full=full_train_target,
             model_config=model_config,
-            iterations_by_seed=final_iterations,
+            iterations_by_seed=model_iteration_counts,
         )
+        test_predictions = predict_ensemble(base_final_models, x_test)
 
-        test_predictions = np.clip(predict_ensemble(final_models, x_test), a_min=0.0, a_max=None)
+        if target_encoding_weight > 0.0:
+            encoded_full_train = add_target_encoding_features_from_reference(
+                reference_features=full_train_features,
+                reference_target=full_train_target,
+                features_to_encode=full_train_features,
+            )
+            encoded_test = add_target_encoding_features_from_reference(
+                reference_features=full_train_features,
+                reference_target=full_train_target,
+                features_to_encode=x_test,
+            )
+            target_encoding_final_models = fit_final_ensemble(
+                x_full=encoded_full_train,
+                y_full=full_train_target,
+                model_config=model_config,
+                iterations_by_seed=target_encoding_iteration_counts,
+            )
+            encoded_test_predictions = predict_ensemble(target_encoding_final_models, encoded_test)
+            test_predictions = (
+                (1.0 - target_encoding_weight) * test_predictions
+                + target_encoding_weight * encoded_test_predictions
+            )
+
+        test_predictions = np.clip(test_predictions, a_min=0.0, a_max=None)
         submission_output_path = output_dir / "submission_predictions.csv"
         save_submission(submission_path, test_predictions, submission_output_path)
         latest_prediction_path = save_latest_prediction_copy(
@@ -575,7 +722,7 @@ def run_experiment(
         "training_seconds": f"{training_seconds:.1f}",
         "total_seconds": f"{time.time() - total_start:.1f}",
         "best_iteration": average_best_iteration,
-        "ensemble_size": len(models),
+        "ensemble_size": len(base_models) + len(target_encoding_models),
         "train_rows": len(train_split_df),
         "validation_rows": len(valid_split_df),
         "num_features": x_train.shape[1],
