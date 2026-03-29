@@ -6,7 +6,7 @@ This repo adapts the structure of [`karpathy/autoresearch`](https://github.com/k
 
 - `train.py` is the only Python file the agent should edit.
 - There is intentionally no `prepare.py`; preprocessing and feature engineering live inside `train.py`.
-- `program.md` is the main control file for the agent. It defines the endless experiment loop and the ground rules.
+- `program.md` is the main control file for the agent. It defines the endless experiment loop, model roles, and ground rules.
 
 ## Goal
 
@@ -52,7 +52,17 @@ uv run train.py --train-path ../Train.csv --test-path ../Test.csv --submission-p
 
 `uv run train.py` is a single evaluation run. It writes generated artifacts into `outputs/` and prints a stable summary block including `val_rmse`.
 
-## Endless search
+## Recommended Autoresearch Setup
+
+This repo is intended to be operated in the same style as `autoresearch`:
+
+- lead agent: `gpt-5.2`
+- research/planning: `gpt-5.2`
+- coding / implementation / git push worker: `gpt-5.3-codex` with `high` reasoning
+
+The lead agent should open and follow [program.md](/Users/hpu4454/Desktop/Compititions/Dataset/taxI_trip_distance/program.md). It should keep running until manually interrupted, and it should only persist and push changes when validation RMSE improves.
+
+## Optional Built-in Search
 
 To keep searching until you manually stop it:
 
@@ -79,3 +89,5 @@ uv run train.py --autoloop | tee run.log
 # test the loop without committing or pushing
 uv run train.py --autoloop --max-runs 3 --no-commit --no-push
 ```
+
+The built-in loop is a fallback. The preferred workflow is still the external `program.md`-driven agent loop.

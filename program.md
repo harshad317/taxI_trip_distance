@@ -1,151 +1,133 @@
 # taxi autoresearch
 
-This repo adapts the `autoresearch` workflow to the Taxi Trip Distance challenge.
+This repo should be operated in the same spirit as `karpathy/autoresearch`, but for the Taxi Trip Distance challenge.
+
+## Model roles
+
+Use these roles consistently:
+
+- lead agent and research director: `gpt-5.2`
+- coding worker: `gpt-5.3-codex`
+- coding worker reasoning effort: `high`
+
+The lead agent owns research direction, experiment selection, result triage, and loop control.
+The coding worker owns implementation, running commands, collecting metrics, committing, and pushing improvements.
+
+## Scope
+
+This repo is intentionally small:
+
+- `train.py` is the only Python file you should edit for experiments.
+- `program.md` is the main control file and should guide the lead agent.
+- there is no `prepare.py`
 
 ## Setup
 
-To set up a new autonomous run, work with the user to:
+At the start of a new run:
 
-1. Agree on a run tag. Use a short tag based on the date, for example `mar29`.
-2. Create a fresh branch such as `autoresearch/<tag>`.
-3. Read the in-scope files for full context:
+1. Read:
    - `README.md`
    - `train.py`
    - `program.md`
    - `pyproject.toml`
-4. Verify the dataset exists. `train.py` auto-discovers `Train.csv`, `Test.csv`, and `Submission.csv` from:
-   - the working directory
-   - the repo root
-   - the repo parent directory
-   If they are missing, ask the human to place them or pass explicit paths.
-5. Initialize `results.tsv` with a header row only. Keep it untracked.
-6. Run the baseline once before changing anything.
-
-## Scope
-
-The repo is intentionally small:
-
-- `train.py` is the only Python file you should edit.
-- `program.md` is the human-owned control file.
-- There is no `prepare.py`; all preprocessing, feature engineering, training, validation, and submission export live in `train.py`.
+2. Verify the dataset exists. `train.py` auto-discovers:
+   - `Train.csv`
+   - `Test.csv`
+   - `Submission.csv`
+   from the working directory, repo root, or repo parent directory.
+3. Ensure `results.tsv` exists with a header row and remains untracked.
+4. Run the baseline once before making changes.
 
 ## Fixed evaluation protocol
 
-These rules exist so experiments stay comparable:
+These rules are fixed unless the human explicitly changes them:
 
-- Target column: `trip_distance_miles`
-- Validation split: 20 percent of `Train.csv`
-- Split seed: `42`
-- Metric: RMSE on the validation split
-- Lower `val_rmse` is better
-
-Do not change the evaluation protocol unless the human explicitly asks. You may improve features, model choice, hyperparameters, ensembling, regularization, or training logic inside `train.py`, but keep the validation metric and split stable.
-
-## What you can change
-
-- Feature engineering inside `train.py`
-- Model selection and hyperparameters
-- Training logic
-- Submission generation logic
-- Logging details, as long as the required summary keys remain intact
-
-## What you should not change
-
-- The dataset itself
-- The target column
-- The 80/20 validation protocol
-- The `val_rmse:` output line format
-- Dependencies in `pyproject.toml`, unless the human explicitly asks
+- target: `trip_distance_miles`
+- validation split: 20 percent of `Train.csv`
+- split seed: `42`
+- metric: validation RMSE
+- lower `val_rmse` is better
 
 ## Baseline run
 
-Launch a single experiment with:
+Run:
 
 ```bash
 uv run train.py > run.log 2>&1
 ```
 
-The script prints a summary block like this:
-
-```text
----
-val_rmse:          0.737727
-training_seconds:  12.3
-total_seconds:     13.1
-best_iteration:    1120
-train_rows:        11759
-validation_rows:   2940
-submission_file:   outputs/submission_predictions.csv
-```
-
-Extract the key metric with:
+Then extract:
 
 ```bash
 grep "^val_rmse:\|^best_iteration:" run.log
 ```
 
-## Logging results
+## Lead agent workflow
 
-Keep `results.tsv` as a tab-separated file with this schema:
+The lead agent is `gpt-5.2`. It should:
+
+1. Study the current baseline, results, and recent failures.
+2. Research the next promising idea.
+3. Form exactly one bounded experiment hypothesis at a time.
+4. Spawn a coding worker using `gpt-5.3-codex` with `high` reasoning.
+5. Give that worker clear ownership of:
+   - `train.py`
+   - optionally `README.md` or `program.md` if documentation needs to be updated
+6. Review the returned metric and code changes.
+7. Keep and push only true improvements.
+8. Discard regressions or crashes and continue immediately.
+
+## Coding worker workflow
+
+The coding worker is `gpt-5.3-codex` with `high` reasoning. It should:
+
+1. Implement only the assigned experiment.
+2. Run the experiment and collect:
+   - `val_rmse`
+   - `best_iteration`
+   - any crash details if applicable
+3. If the run improves the best known `val_rmse`:
+   - keep the code changes
+   - update `results.tsv`
+   - commit the improvement
+   - push to the current branch
+4. If the run does not improve:
+   - do not keep the experiment
+   - log it as `discard` or `crash`
+   - return control to the lead agent for the next idea
+
+## Results logging
+
+Keep `results.tsv` tab-separated with this schema:
 
 ```text
-commit	val_rmse	best_iteration	status	description
+timestamp	run	status	val_rmse	best_iteration	commit	branch	description	model_config	feature_config
 ```
 
-Column rules:
+`results.tsv` must not be committed.
 
-1. Short git commit hash
-2. Validation RMSE, or `0.000000` for crashes
-3. Best iteration, or `0` for crashes
-4. `keep`, `discard`, or `crash`
-5. Short description of the experiment
+## What can change
 
-Example:
+- feature engineering inside `train.py`
+- model hyperparameters
+- training logic
+- submission generation
+- repo docs when the operating workflow changes
 
-```text
-commit	val_rmse	best_iteration	status	description
-a1b2c3d	0.737727	1120	keep	baseline catboost with engineered time and geo features
-b2c3d4e	0.731400	980	keep	increase depth and add borough interaction feature
-c3d4e5f	0.744100	1400	discard	switch to weaker regularization
-d4e5f6g	0.000000	0	crash	invalid feature transform
-```
+## What must not change casually
 
-## Built-in experiment loop
+- dataset contents
+- target column
+- fixed validation protocol
+- `val_rmse:` summary line
 
-The endless loop is implemented directly inside `train.py`.
+## Fallback mode
 
-Launch it with:
+`train.py --autoloop` exists as a non-LLM fallback search loop. It is not the primary workflow. The preferred workflow is still:
 
-```bash
-uv run train.py --autoloop > run.log 2>&1
-```
-
-Its behavior is:
-
-1. Run the current baseline configuration once.
-2. Generate a mutated candidate configuration.
-3. Evaluate the candidate on the fixed validation split.
-4. Log the result to `results.tsv`.
-5. If the candidate improves `val_rmse`, persist it into `train.py`.
-6. Commit the improved `train.py`.
-7. Push the improved commit to the current branch, unless `--no-push` is used.
-8. If the candidate does not improve, discard it and try another mutation.
-9. Repeat forever until interrupted.
-
-Useful flags:
-
-- `--max-runs N` for a bounded test run
-- `--no-commit` to test the loop without changing git history
-- `--no-push` to keep improvements local
-- `--allow-dirty` to bypass the clean-tree check
-
-## Operating principles
-
-- Favor simple changes with measurable gains.
-- Avoid test leakage. Never use `Test.csv` labels because they do not exist.
-- Prefer stable, reproducible experiments over noisy hacks.
-- If you run out of ideas, think harder and keep iterating.
+- `gpt-5.2` for research/control
+- `gpt-5.3-codex` at `high` reasoning for coding, committing, and pushing
 
 ## Never stop
 
-Once the experiment loop begins, do not pause to ask the human whether to continue. Do not ask if this is a good stopping point. Continue running experiments until the human manually interrupts you.
+Once the experiment loop begins, do not ask whether to continue. Keep researching, delegating, evaluating, and only preserving genuine improvements until the user manually stops the run.
