@@ -27,6 +27,13 @@ except ImportError as exc:  # pragma: no cover
         "CatBoost is required. Install dependencies first with `uv sync`."
     ) from exc
 
+try:
+    from xgboost import XGBRegressor
+except ImportError as exc:  # pragma: no cover
+    raise SystemExit(
+        "XGBoost is required. Install dependencies first with `uv sync`."
+    ) from exc
+
 
 TARGET_COLUMN = "trip_distance_miles"
 VALIDATION_FRACTION = 0.20
@@ -57,6 +64,14 @@ class ExperimentConfig:
     early_stopping_rounds: int = 200
     ensemble_seeds: tuple[int, ...] = (42,)
     target_encoding_blend_weight: float = 0.0
+    xgb_blend_weight: float = 0.0
+    xgb_n_estimators: int = 2000
+    xgb_learning_rate: float = 0.035
+    xgb_max_depth: int = 6
+    xgb_min_child_weight: float = 8.0
+    xgb_subsample: float = 0.8
+    xgb_colsample_bytree: float = 0.9
+    xgb_reg_lambda: float = 4.0
 
 
 @dataclass
@@ -85,6 +100,14 @@ MODEL_CONFIG = ExperimentConfig(
     early_stopping_rounds=200,
     ensemble_seeds=(42, 43, 44, 45, 49),
     target_encoding_blend_weight=0.2,
+    xgb_blend_weight=0.11,
+    xgb_n_estimators=2000,
+    xgb_learning_rate=0.035,
+    xgb_max_depth=6,
+    xgb_min_child_weight=8.0,
+    xgb_subsample=0.8,
+    xgb_colsample_bytree=0.9,
+    xgb_reg_lambda=4.0,
 )
 FEATURE_CONFIG = FeatureConfig(
     keep_raw_datetime_strings=True,
@@ -501,6 +524,45 @@ def predict_ensemble(
     return np.mean(predictions, axis=0)
 
 
+def encode_frames_for_xgboost(*frames: pd.DataFrame) -> list[pd.DataFrame]:
+    encoded_frames = [frame.copy() for frame in frames]
+    if not encoded_frames:
+        return []
+
+    for column in encoded_frames[0].columns:
+        if pd.api.types.is_numeric_dtype(encoded_frames[0][column]):
+            continue
+
+        categories = sorted(
+            {
+                value
+                for frame in encoded_frames
+                for value in frame[column].astype(str).tolist()
+            }
+        )
+        mapping = {value: idx for idx, value in enumerate(categories)}
+        for frame in encoded_frames:
+            frame[column] = frame[column].astype(str).map(mapping).astype("int32")
+
+    return encoded_frames
+
+
+def build_xgboost_model(model_config: ExperimentConfig) -> XGBRegressor:
+    return XGBRegressor(
+        objective="reg:squarederror",
+        tree_method="hist",
+        n_estimators=model_config.xgb_n_estimators,
+        learning_rate=model_config.xgb_learning_rate,
+        max_depth=model_config.xgb_max_depth,
+        min_child_weight=model_config.xgb_min_child_weight,
+        subsample=model_config.xgb_subsample,
+        colsample_bytree=model_config.xgb_colsample_bytree,
+        reg_lambda=model_config.xgb_reg_lambda,
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+    )
+
+
 def fit_final_model(
     x_full: pd.DataFrame,
     y_full: pd.Series,
@@ -628,6 +690,7 @@ def run_experiment(
     target_encoding_models: list[CatBoostRegressor] = []
     target_encoding_iteration_counts: list[int] = []
     target_encoding_weight = model_config.target_encoding_blend_weight
+    xgb_blend_weight = model_config.xgb_blend_weight
 
     if target_encoding_weight > 0.0:
         encoded_train, encoded_valid = add_target_encoding_features_for_validation(
@@ -652,6 +715,16 @@ def run_experiment(
         validation_predictions = (
             (1.0 - target_encoding_weight) * validation_predictions
             + target_encoding_weight * encoded_validation_predictions
+        )
+
+    if xgb_blend_weight > 0.0:
+        xgb_train, xgb_valid = encode_frames_for_xgboost(x_train, x_valid)
+        xgb_model = build_xgboost_model(model_config)
+        xgb_model.fit(xgb_train, y_train, eval_set=[(xgb_valid, y_valid)], verbose=False)
+        xgb_validation_predictions = xgb_model.predict(xgb_valid)
+        validation_predictions = (
+            (1.0 - xgb_blend_weight) * validation_predictions
+            + xgb_blend_weight * xgb_validation_predictions
         )
     training_seconds = time.time() - train_start
 
@@ -707,6 +780,16 @@ def run_experiment(
                 + target_encoding_weight * encoded_test_predictions
             )
 
+        if xgb_blend_weight > 0.0:
+            xgb_full_train, xgb_test = encode_frames_for_xgboost(full_train_features, x_test)
+            xgb_final_model = build_xgboost_model(model_config)
+            xgb_final_model.fit(xgb_full_train, full_train_target, verbose=False)
+            xgb_test_predictions = xgb_final_model.predict(xgb_test)
+            test_predictions = (
+                (1.0 - xgb_blend_weight) * test_predictions
+                + xgb_blend_weight * xgb_test_predictions
+            )
+
         test_predictions = np.clip(test_predictions, a_min=0.0, a_max=None)
         submission_output_path = output_dir / "submission_predictions.csv"
         save_submission(submission_path, test_predictions, submission_output_path)
@@ -722,7 +805,7 @@ def run_experiment(
         "training_seconds": f"{training_seconds:.1f}",
         "total_seconds": f"{time.time() - total_start:.1f}",
         "best_iteration": average_best_iteration,
-        "ensemble_size": len(base_models) + len(target_encoding_models),
+        "ensemble_size": len(base_models) + len(target_encoding_models) + int(xgb_blend_weight > 0.0),
         "train_rows": len(train_split_df),
         "validation_rows": len(valid_split_df),
         "num_features": x_train.shape[1],
